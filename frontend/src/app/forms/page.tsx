@@ -2,7 +2,7 @@
 import AppShell from "@/components/layout/AppShell";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { surveyApi } from "@/lib/api";
-import { useState, useRef } from "react";
+import { useState, useRef, Suspense } from "react";
 import { Upload, Plus, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import api from "@/lib/api";
 import { useSearchParams } from "next/navigation";
@@ -20,7 +20,7 @@ const QUESTION_TYPES = [
 
 const DEFAULT_QUESTION = { type: "text", name: "", label: "", required: false, choices: "" };
 
-export default function FormsPage() {
+function FormsContent() {
   const qc = useQueryClient();
   const params = useSearchParams();
   const defaultSurvey = params.get("survey") || "";
@@ -220,6 +220,15 @@ export default function FormsPage() {
           </div>
         )}
       </div>
+  );
+}
+
+export default function FormsPage() {
+  return (
+    <AppShell>
+      <Suspense fallback={<div className="p-6 text-gray-400">Loading…</div>}>
+        <FormsContent />
+      </Suspense>
     </AppShell>
   );
 }
