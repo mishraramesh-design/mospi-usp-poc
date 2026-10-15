@@ -66,7 +66,7 @@ services:
 
   # ─── MinIO ───────────────────────────────────────────────────────────────
   minio:
-    image: minio/minio:RELEASE.2024-01-01T16-36-33Z
+    image: minio/minio:latest
     container_name: mospi-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
