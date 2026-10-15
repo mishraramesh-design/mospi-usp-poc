@@ -1,0 +1,174 @@
+name: MoSPI USP — Build, Push & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: docker.io
+  IMAGE_BACKEND: mishramesh/mospi-backend
+  IMAGE_FRONTEND: mishramesh/mospi-frontend
+  IMAGE_RAPI: mishramesh/mospi-rapi
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        run: echo "version=$(date +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.IMAGE_BACKEND }}:latest
+            ${{ env.IMAGE_BACKEND }}:${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.IMAGE_FRONTEND }}:latest
+            ${{ env.IMAGE_FRONTEND }}:${{ steps.meta.outputs.version }}
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://${{ secrets.VPS_HOST }}/api
+            NEXT_PUBLIC_ODK_URL=http://${{ secrets.VPS_HOST }}:8383
+            NEXT_PUBLIC_SUPERSET_URL=http://${{ secrets.VPS_HOST }}:8088
+            NEXT_PUBLIC_AIRFLOW_URL=http://${{ secrets.VPS_HOST }}:8080
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push R API
+        uses: docker/build-push-action@v5
+        with:
+          context: ./r-api
+          push: true
+          tags: |
+            ${{ env.IMAGE_RAPI }}:latest
+            ${{ env.IMAGE_RAPI }}:${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Hostinger VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy compose files to VPS
+        run: |
+          scp -i ~/.ssh/id_ed25519 \
+            docker-compose.yml .env.example \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/mospi-usp-poc/
+
+      - name: Copy infra configs
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "mkdir -p /opt/mospi-usp-poc/infra/nginx \
+                       /opt/mospi-usp-poc/infra/postgres/init \
+                       /opt/mospi-usp-poc/infra/superset \
+                       /opt/mospi-usp-poc/infra/prometheus \
+                       /opt/mospi-usp-poc/infra/grafana/provisioning/datasources \
+                       /opt/mospi-usp-poc/infra/grafana/provisioning/dashboards"
+          scp -i ~/.ssh/id_ed25519 -r infra/ \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/opt/mospi-usp-poc/
+
+      - name: Write .env on VPS
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "cat > /opt/mospi-usp-poc/.env" <<'ENVEOF'
+          POSTGRES_HOST=postgres
+          POSTGRES_PORT=5432
+          POSTGRES_DB=mospi_usp
+          POSTGRES_USER=appuser
+          POSTGRES_PASSWORD=apppassword
+          PG_HOST=${{ secrets.PG_HOST }}
+          PG_PORT=${{ secrets.PG_PORT }}
+          PG_USER=${{ secrets.PG_USER }}
+          PG_PASSWORD=${{ secrets.PG_PASSWORD }}
+          JWT_SECRET=MoSPI_JWT_Secret_2024_NeGD
+          JWT_ALGORITHM=HS256
+          JWT_EXPIRE_MINUTES=480
+          ODK_BASE_URL=http://odk-central:8383
+          ODK_ADMIN_EMAIL=admin@mospi.gov.in
+          ODK_ADMIN_PASSWORD=MoSPI@2024
+          MINIO_ROOT_USER=minioadmin
+          MINIO_ROOT_PASSWORD=MoSPI@MinIO2024
+          REDIS_URL=redis://redis:6379/0
+          AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://appuser:apppassword@postgres:5432/airflow
+          AIRFLOW__CORE__EXECUTOR=LocalExecutor
+          AIRFLOW__CORE__FERNET_KEY=MoSPI2024FernetKeyForAirflowDAGsEncryptedConnections12==
+          SUPERSET_SECRET_KEY=MoSPI@2024SupersetKey
+          SUPERSET_ADMIN_USERNAME=admin
+          SUPERSET_ADMIN_PASSWORD=admin
+          R_API_URL=http://r-api:8686
+          GF_SECURITY_ADMIN_USER=admin
+          GF_SECURITY_ADMIN_PASSWORD=MoSPI@2024
+          ENVEOF
+
+      - name: Pull new images and restart stack
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
+          cd /opt/mospi-usp-poc
+          # Pull the custom images (postgres/redis/etc use registry directly)
+          docker pull mishramesh/mospi-backend:latest
+          docker pull mishramesh/mospi-frontend:latest
+          docker pull mishramesh/mospi-rapi:latest
+          # Build-tag local names to match compose image: fields
+          docker tag mishramesh/mospi-backend:latest mishramesh/mospi-usp-poc:backend
+          docker tag mishramesh/mospi-frontend:latest mishramesh/mospi-usp-poc:frontend
+          docker tag mishramesh/mospi-rapi:latest mishramesh/mospi-usp-poc:r-api
+          docker compose up -d --remove-orphans
+          docker compose ps
+          EOF
+
+      - name: Health check
+        run: |
+          sleep 30
+          curl -f --retry 5 --retry-delay 10 \
+            http://${{ secrets.VPS_HOST }}/api/health || echo "Health check failed — check VPS logs"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "=== MoSPI USP Deployment ==="
+          echo "Tag: ${{ needs.build-and-push.outputs.tag }}"
+          echo "Frontend:  http://${{ secrets.VPS_HOST }}"
+          echo "API:       http://${{ secrets.VPS_HOST }}/api/docs"
+          echo "ODK:       http://${{ secrets.VPS_HOST }}:8383"
+          echo "Superset:  http://${{ secrets.VPS_HOST }}:8088"
+          echo "Airflow:   http://${{ secrets.VPS_HOST }}:8080"
+          echo "Grafana:   http://${{ secrets.VPS_HOST }}:3001"

@@ -1,0 +1,16 @@
+# Production override — uses pre-built images from Docker Hub instead of local builds
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+version: "3.9"
+
+services:
+  backend:
+    build: !reset null
+    image: mishramesh/mospi-backend:latest
+
+  frontend:
+    build: !reset null
+    image: mishramesh/mospi-frontend:latest
+
+  r-api:
+    build: !reset null
+    image: mishramesh/mospi-rapi:latest

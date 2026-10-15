@@ -1,0 +1,361 @@
+version: "3.9"
+
+x-common-env: &common-env
+  PG_HOST: ${PG_HOST:-postgres}
+  PG_PORT: ${PG_PORT:-5432}
+  PG_USER: ${PG_USER:-appuser}
+  PG_PASSWORD: ${PG_PASSWORD:-apppassword}
+  PG_DB: ${PG_DB:-mospi_usp}
+
+networks:
+  mospi:
+    driver: bridge
+
+volumes:
+  pg_data:
+  minio_data:
+  redis_data:
+  airflow_logs:
+  airflow_plugins:
+  prometheus_data:
+  grafana_data:
+  superset_data:
+  odk_data:
+
+services:
+
+  # ─── PostgreSQL 17 + PostGIS ─────────────────────────────────────────────
+  postgres:
+    image: postgis/postgis:17-3.4
+    container_name: mospi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-appuser}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-apppassword}
+      POSTGRES_DB: ${PG_DB:-mospi_usp}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5433:5432"
+    networks: [mospi]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d mospi_usp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+
+  # ─── Redis ───────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: mospi-redis
+    restart: unless-stopped
+    volumes: [redis_data:/data]
+    networks: [mospi]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ─── MinIO ───────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-01-01T16-36-33Z
+    container_name: mospi-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes: [minio_data:/data]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks: [mospi]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ─── ODK Central ─────────────────────────────────────────────────────────
+  odk-central:
+    image: ghcr.io/getodk/central-backend:v2024.1.0
+    container_name: mospi-odk
+    restart: unless-stopped
+    environment:
+      DOMAIN: localhost
+      SYSADMIN_EMAIL: ${ODK_ADMIN_EMAIL:-admin@mospi.gov.in}
+      DB_HOST: postgres
+      DB_USER: ${PG_USER:-appuser}
+      DB_PASSWORD: ${PG_PASSWORD:-apppassword}
+      DB_NAME: odk_central
+      REDIS_URL: redis://redis:6379/1
+      NODE_ENV: production
+      # HTTP mode — no TLS for POC
+      HTTP_ONLY: "true"
+    ports:
+      - "8383:8383"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - odk_data:/data
+      - ./odk/forms:/forms:ro
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # ─── FastAPI Backend ──────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: mishramesh/mospi-usp-poc:backend
+    container_name: mospi-backend
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+      SECRET_KEY: ${SECRET_KEY:-change-me-super-secret-key-32chars!!}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-480}
+      ODK_URL: ${ODK_URL:-http://odk-central:8383}
+      ODK_ADMIN_EMAIL: ${ODK_ADMIN_EMAIL:-admin@mospi.gov.in}
+      ODK_ADMIN_PASSWORD: ${ODK_ADMIN_PASSWORD:-MoSPI@2024}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-mospi-attachments}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      R_API_URL: http://r-api:8686
+      AIRFLOW_URL: http://airflow-webserver:8080
+      AIRFLOW_USER: ${AIRFLOW_ADMIN_USER:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-MoSPI@2024}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [mospi]
+    volumes:
+      - ./backend:/app:ro
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ─── R Plumber API ───────────────────────────────────────────────────────
+  r-api:
+    build:
+      context: ./r-api
+      dockerfile: Dockerfile
+    image: mishramesh/mospi-usp-poc:r-api
+    container_name: mospi-r-api
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    ports:
+      - "8686:8686"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+
+  # ─── Apache Airflow ───────────────────────────────────────────────────────
+  airflow-init:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: mospi-airflow-init
+    restart: "no"
+    environment:
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR:-LocalExecutor}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-postgresql+psycopg2://appuser:apppassword@postgres:5432/airflow}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-change-me-fernet-key-must-be-32-bytes=}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-change-me-webserver-secret}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-MoSPI@2024}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [mospi]
+    command: version
+
+  airflow-webserver:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: mospi-airflow-web
+    restart: unless-stopped
+    environment:
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR:-LocalExecutor}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-postgresql+psycopg2://appuser:apppassword@postgres:5432/airflow}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-change-me-fernet-key-must-be-32-bytes=}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-change-me-webserver-secret}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    command: webserver
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/airflow/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+      - airflow_plugins:/opt/airflow/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [mospi]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  airflow-scheduler:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: mospi-airflow-scheduler
+    restart: unless-stopped
+    environment:
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR:-LocalExecutor}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-postgresql+psycopg2://appuser:apppassword@postgres:5432/airflow}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-change-me-fernet-key-must-be-32-bytes=}
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:-change-me-webserver-secret}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    command: scheduler
+    volumes:
+      - ./backend/airflow/dags:/opt/airflow/dags:ro
+      - airflow_logs:/opt/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ─── Apache Superset ─────────────────────────────────────────────────────
+  superset:
+    image: apache/superset:3.1.0
+    container_name: mospi-superset
+    restart: unless-stopped
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-change-me-superset-secret-key}
+      DATABASE_URL: postgresql+psycopg2://${PG_USER:-appuser}:${PG_PASSWORD:-apppassword}@postgres:5432/superset
+    command: >
+      /bin/bash -c "
+        superset db upgrade &&
+        superset fab create-admin --username ${SUPERSET_ADMIN_USER:-admin} --firstname Admin --lastname User --email ${SUPERSET_ADMIN_EMAIL:-admin@mospi.gov.in} --password ${SUPERSET_ADMIN_PASSWORD:-MoSPI@2024} || true &&
+        superset init &&
+        gunicorn --bind 0.0.0.0:8088 --workers 2 --timeout 120 'superset.app:create_app()'
+      "
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_data:/app/superset_home
+      - ./infra/superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+
+  # ─── Next.js Frontend ────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: mishramesh/mospi-usp-poc:frontend
+    container_name: mospi-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_SUPERSET_URL: ${NEXT_PUBLIC_SUPERSET_URL:-http://localhost:8088}
+      NEXT_PUBLIC_AIRFLOW_URL: ${NEXT_PUBLIC_AIRFLOW_URL:-http://localhost:8080}
+      NEXT_PUBLIC_ODK_URL: ${NEXT_PUBLIC_ODK_URL:-http://localhost:8383}
+      NEXT_PUBLIC_GRAFANA_URL: ${NEXT_PUBLIC_GRAFANA_URL:-http://localhost:3001}
+    ports:
+      - "3000:3000"
+    depends_on: [backend]
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ─── Prometheus ──────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    container_name: mospi-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ─── Grafana ─────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: mospi-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-MoSPI@2024}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3001:3000"
+    depends_on: [prometheus]
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ─── Nginx reverse proxy ─────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: mospi-nginx
+    restart: unless-stopped
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on: [frontend, backend]
+    networks: [mospi]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
