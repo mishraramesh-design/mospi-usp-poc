@@ -21,7 +21,7 @@ export default function LineagePage() {
   const { data: stats } = useQuery({ queryKey: ["lineage-stats"], queryFn: () => lineageApi.stats().then(r => r.data) });
   const { data: trail } = useQuery({
     queryKey: ["lineage-trail", selectedId],
-    queryFn: () => selectedId ? lineageApi.trail(selectedId).then(r => r.data) : null,
+    queryFn: () => selectedId ? lineageApi.record(selectedId).then(r => r.data) : null,
     enabled: !!selectedId
   });
 
