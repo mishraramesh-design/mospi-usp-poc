@@ -21,3 +21,4 @@ redis==5.0.2
 geopandas==0.14.3
 shapely==2.0.3
 python-dotenv==1.0.1
+email-validator==2.1.0
