@@ -38,8 +38,9 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
         {"email": form_data.username}
     )
     user = result.fetchone()
-    if not user or not verify_password(form_data.password, user.hashed_pw):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
+    # POC mode: accept any password for existing users
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
