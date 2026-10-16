@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import logging
 
-from app.routers import auth, surveys, pipeline, dq, stats, lineage, webhooks, sampling, forms
+from app.routers import auth, surveys, pipeline, dq, stats, lineage, webhooks, sampling, forms, question_bank, simulator
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,7 +36,9 @@ app.include_router(pipeline.router,  prefix="/pipeline", tags=["DI Pipeline"])
 app.include_router(dq.router,        prefix="/dq",       tags=["Data Quality"])
 app.include_router(stats.router,     prefix="/stats",    tags=["Statistical Analysis"])
 app.include_router(lineage.router,   prefix="/lineage",  tags=["Lineage"])
-app.include_router(webhooks.router,  prefix="/webhooks", tags=["Webhooks"])
+app.include_router(webhooks.router,      prefix="/webhooks",       tags=["Webhooks"])
+app.include_router(question_bank.router, prefix="/question-bank",  tags=["Question Bank"])
+app.include_router(simulator.router,     prefix="/simulator",      tags=["Simulator"])
 
 
 @app.get("/health", tags=["System"])

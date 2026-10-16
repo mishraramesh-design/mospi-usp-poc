@@ -6,20 +6,22 @@ import Cookies from "js-cookie";
 import {
   LayoutDashboard, ClipboardList, Database, Shield, BarChart3,
   GitBranch, Map, Users, Settings, LogOut, ChevronDown,
-  Activity, Upload, FlaskConical
+  Activity, Upload, FlaskConical, BookOpen, TestTube2
 } from "lucide-react";
 
 const navItems = [
-  { href: "/dashboard",  label: "Dashboard",           icon: LayoutDashboard },
-  { href: "/surveys",    label: "Survey Management",    icon: ClipboardList },
-  { href: "/forms",      label: "Form Builder",         icon: Upload },
-  { href: "/sampling",   label: "Sampling",             icon: Map },
-  { href: "/pipeline",   label: "DI Pipeline",          icon: Activity },
-  { href: "/quality",    label: "Data Quality",         icon: Shield },
-  { href: "/analytics",  label: "Statistical Analysis", icon: FlaskConical },
-  { href: "/lineage",    label: "Data Lineage",         icon: GitBranch },
-  { href: "/reporting",  label: "Reporting / GIS",      icon: BarChart3 },
-  { href: "/users",      label: "Users",                icon: Users },
+  { href: "/dashboard",      label: "Dashboard",           icon: LayoutDashboard },
+  { href: "/surveys",        label: "Survey Management",    icon: ClipboardList },
+  { href: "/forms",          label: "Form Builder",         icon: Upload },
+  { href: "/question-bank",  label: "Question Bank",        icon: BookOpen,   badge: "WoW" },
+  { href: "/simulator",      label: "Simulator",            icon: TestTube2,  badge: "WoW" },
+  { href: "/sampling",       label: "Sampling",             icon: Map },
+  { href: "/pipeline",       label: "DI Pipeline",          icon: Activity },
+  { href: "/quality",        label: "Data Quality",         icon: Shield },
+  { href: "/analytics",      label: "Statistical Analysis", icon: FlaskConical },
+  { href: "/lineage",        label: "Data Lineage",         icon: GitBranch },
+  { href: "/reporting",      label: "Reporting / GIS",      icon: BarChart3 },
+  { href: "/users",          label: "Users",                icon: Users },
 ];
 
 interface AppShellProps {
@@ -80,7 +82,12 @@ export default function AppShell({ children }: AppShellProps) {
                 className={active ? "nav-item-active" : "nav-item"}
                 title={!sidebarOpen ? item.label : undefined}>
                 <Icon className="w-4.5 h-4.5 flex-shrink-0" size={18} />
-                {sidebarOpen && <span className="truncate">{item.label}</span>}
+                {sidebarOpen && <span className="truncate flex-1">{item.label}</span>}
+                {sidebarOpen && (item as any).badge && (
+                  <span className="text-[9px] font-bold bg-amber-400 text-amber-900 rounded px-1 py-0.5 leading-none">
+                    {(item as any).badge}
+                  </span>
+                )}
               </Link>
             );
           })}
